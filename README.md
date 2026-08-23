@@ -1,6 +1,6 @@
 # alfa-homelab
 
-Public architecture and 27B benchmark notes for a LAN llama.cpp RPC cluster (plus QLoRA lock vs inference).
+Public architecture and 27B benchmark notes for a LAN llama.cpp RPC cluster.
 
 **Doc:** [docs/HOMELAB_WRITEUP.md](docs/HOMELAB_WRITEUP.md)
 
