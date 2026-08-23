@@ -10,7 +10,7 @@ References: [llama.cpp RPC](https://github.com/ggml-org/llama.cpp/blob/master/to
 
 ## Summary
 
-The cluster turns several NVIDIA GPUs on the LAN into one loaded GGUF. A CPU coordinator on the NAS owns the weights and splits layers across `rpc-server` processes (one process per GPU). Applications do not talk to those GPUs. They send OpenAI-compatible `POST /v1/chat/completions` to LiteLLM on the NAS, which forwards to the coordinator.
+The cluster turns several NVIDIA GPUs on the LAN into one loaded GGUF. A CPU coordinator on the NAS owns the weights and splits layers across `rpc-server` processes (one process per GPU). Application UIs do not talk to those GPUs. Each product backend sends OpenAI-compatible `POST /v1/chat/completions` to LiteLLM on the NAS, which forwards to the coordinator.
 
 Only one GGUF is in VRAM at a time. The default is Qwen3.8-27B Q8_0. Two larger loads (72B dense and 80B-class MoE) replace that file for the whole boot; they are not extra models sitting beside 27B.
 
@@ -31,7 +31,7 @@ Older or slower cards stay in the mesh for VRAM so the large files fit. They are
 llama.cpp RPC is a coordinator plus remote backends. The coordinator (`llama-server` on NAS CPU) maps the GGUF with `--tensor-split` and opens an RPC session to each `rpc-server`. Each backend holds a slice of layers in that GPU's VRAM. Official RPC docs: backends are the set passed at coordinator start; there is no hot-add or hot-remove.
 
 ```
-Application backends (own API, own database)
+Product backends (own API, own database)
         │  POST /v1/chat/completions
         ▼
 LiteLLM (NAS)     aliases: frontier-code, frontier
@@ -57,7 +57,7 @@ rpc-server × N (one process per GPU)
 
 ## Starting inference and GPU opt-in
 
-Inference is started from a Windows WinForms app on the orchestrator PC (desktop shortcut). The home screen has a **Run models** workspace. That screen is stop, start, model choice, and which extra GPUs to include. It is not a per-host compose click.
+Inference is started from a Windows WinForms app on the orchestrator PC (desktop shortcut). Home has two workspaces: **Run models** and **Train**. Run models is stop, start, pool radio (27B / 72B / 80B), and which extra GPUs to include. It is not a per-host compose click.
 
 **Always-on GPUs** (every inference start):
 
@@ -114,8 +114,8 @@ VRAM (approx.):
 
 | Layout | Physical | Assigned (`-ts`) | Load |
 |--------|----------|------------------|------|
-| Core only | ~35–45 GB usable | — | 27B Q8 (~29 GB weights + KV for 4 slots) |
-| Core + all opt-in | ~84 GB | ~62–68 GB | 72B or 80B exclusive |
+| Core only | ~35–45 GB usable | ~35 GB | 27B Q8 (~29 GB weights + KV for 4 slots) |
+| Core + all opt-in | ~84 GB physical | ~68 GB (27B) / ~62 GB (72B and 80B) | 27B with extras, or exclusive 72B/80B |
 
 ---
 
@@ -124,7 +124,7 @@ VRAM (approx.):
 - One git clone per host. GitHub is the sync bus. Source is not copied with SCP.
 - Files ≥100 MB seed on the NAS. Workers read NFS/SMB. Workers do not pull those blobs from Hugging Face or Docker Hub.
 - Docker runs `rpc-server`, `llama-server`, LiteLLM, the ALFa API, and CPU RAG sidecars.
-- Application model ids are `frontier-code` (default) and `frontier`. Both names point at whichever GGUF this boot loaded. Apps do not switch files themselves.
+- Cluster aliases are `frontier-code` (production default) and `frontier`. Both names are remapped to whichever GGUF this boot loaded. Product apps do not select GGUF files.
 
 ---
 
@@ -132,7 +132,7 @@ VRAM (approx.):
 
 ### Qwen3.8-27B Q8_0 (default)
 
-[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), ~29 GB. Q8_0 is the production quant on this mesh: it fits the core VRAM with KV for four parallel slots. FP16 is not used.
+Architecture: [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Production GGUF: [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) `Qwen3.8-27B-Q8_0.gguf` (~29 GB). Q8_0 is the production quant on this mesh: it fits the core VRAM with KV for four parallel slots. FP16 is not used.
 
 Coordinator flags: `--parallel 4`, `--ctx-size 163840` (40960 per slot), KV `q4_0`. Four slots are two interactive and two automated (keep-warm and similar).
 
@@ -140,7 +140,7 @@ Keep-warm: NAS cron every 15 minutes sends four concurrent streaming completions
 
 ### Qwen2.5-72B-Instruct Q5_K_M (exclusive)
 
-[Qwen2.5-72B-Instruct](https://huggingface.co/Qwen/Qwen2.5-72B-Instruct), ~52 GB dense. The core boxes cannot hold it. Start with every opt-in GPU checked, after 27B is stopped. `PARALLEL=1`, context 86016 (YaRN); drop to 65536 if the 6–8 GB cards are near OOM.
+[Qwen2.5-72B-Instruct](https://huggingface.co/Qwen/Qwen2.5-72B-Instruct) GGUF [Q5_K_M](https://huggingface.co/Qwen/Qwen2.5-72B-Instruct-GGUF), ~52 GB dense. The core boxes cannot hold it. Start with every opt-in GPU checked, after 27B is stopped. `PARALLEL=1`, context 86016 (YaRN); drop to 65536 if the 6–8 GB cards are near OOM.
 
 ### Qwen3-Coder-Next Q5_K_M (exclusive)
 
@@ -152,7 +152,7 @@ Keep-warm: NAS cron every 15 minutes sends four concurrent streaming completions
 
 ALFa is the inference service: GGUF load, LiteLLM, admin HTTP, and the shared chat-widget design. It does not store the other apps' business data.
 
-Each other repo is a consumer. It keeps its own API, auth, and database. A chat widget on that site posts to **that** API, not to ALFa's guest chat. The product API then calls LiteLLM with `frontier-code` or `frontier`. The only coupling is environment (`LITELLM_BASE_URL`, model alias). Consumer repos do not vendor or patch the inference stack.
+Each other repo is a consumer. It keeps its own API, auth, and database. A chat widget on that site posts to **that** API (typically an app-local AI route), not to ALFa's guest chat. The product API then calls LiteLLM with OpenAI-compatible chat completions. Production default alias is `frontier-code`. Some apps use other LiteLLM alias names; those names are configured on the proxy to the same loaded GGUF. Coupling is environment only (`LITELLM_BASE_URL`, model alias). Consumer repos do not vendor or patch the inference stack.
 
 What they use it for:
 
@@ -165,7 +165,7 @@ What they do not use it for:
 - Login and session services (no GPU).
 - Cross-app retrieval. A chat opened on one product must not read another product's database. ALFa guest chat has no product DBs either.
 
-Changing 27B to 80B is a cluster restart. Client aliases stay `frontier-code` / `frontier`, so app env does not need a model-id edit for that switch.
+Changing 27B to 80B is a cluster restart. Client aliases stay valid, so app env does not need a GGUF or weight-name edit for that switch.
 
 ---
 
