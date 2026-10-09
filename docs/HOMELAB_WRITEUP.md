@@ -67,20 +67,24 @@ Inference is started from a Windows WinForms app on the orchestrator PC (desktop
 
 Those three boxes are the 27B Q8 mesh. They are enough for the default load. They are not enough for 72B or 80B.
 
-**Opt-in GPUs** (chosen at this start only):
+**27B opt-in GPUs** (chosen at this start only):
 
-- Two 5070 12 GB gaming PCs
 - One 5060 8 GB gaming PC
+- Two 5070 12 GB gaming PCs (blocked while the training lock is set; see [Training](#training))
 - Spare GTX 1070 8 GB
 - VM GTX 1660 Super 6 GB
+
+**72B / 80B mesh** (exclusive load; same shard ports as the 27B opt-in, so 27B and 72B/80B never share a GPU at the same time):
+
+- All five opt-in GPUs above. The two 5070 cards are required for the full 72B/80B mesh
 
 Each extra host has a checkbox (or an equivalent Y/N prompt if start is run from the CLI). Check it only when that PC is on, reachable over SSH, and you are willing to give the GPU to inference for this session. Leave it unchecked if the machine is off, someone is gaming, or you do not need the VRAM.
 
 | Goal | Action |
 |------|--------|
 | 27B on the core boxes | Start with no extra GPUs checked |
-| 27B plus extra VRAM | Check whichever extra boxes are actually available |
-| 72B or 80B | Check every extra GPU. Start fails or OOMs if the mesh is short |
+| 27B plus extra VRAM | Check whichever extra boxes are actually available (leave the two 5070 PCs out while training) |
+| 72B or 80B | Check every extra GPU, including both 5070 PCs. Start fails or OOMs if the mesh is short |
 | Take a GPU back for games | Full **Stop**, then **Start** with that box unchecked. Do not kill one shard while the coordinator is connected |
 | Change model (27B to 80B, or the reverse) | Full stop, pick the other radio, start again |
 
@@ -100,13 +104,12 @@ Core mesh (27B Q8 without extra GPUs):
 | Dual-GPU Linux | i7-9700K, 48 GB | 3060 12 GB + 5060 8 GB | Two shards |
 | Windows | Ryzen 9 7900X, 32 GB | 3060 12 GB | Orchestrator + one shard |
 
-Opt-in mesh (this start):
+Opt-in mesh (27B; this start):
 
 | GPU | Typical use |
 |-----|-------------|
-| 5070 12 GB (desktop A) | Extra 27B slice; required for 72B/80B |
-| 5070 12 GB (desktop B) | Same |
-| 5060 8 GB (desktop C) | Same, smaller slice |
+| 5060 8 GB (desktop C) | Extra 27B slice |
+| 5070 12 GB (desktops A and B) | Extra 27B slice; required for the full 72B/80B mesh. Not available to 27B while the training lock is set |
 | GTX 1070 8 GB | VRAM only |
 | GTX 1660 Super 6 GB | VRAM only |
 
@@ -114,8 +117,10 @@ VRAM (approx.):
 
 | Layout | Physical | Assigned (`-ts`) | Load |
 |--------|----------|------------------|------|
-| Core only | ~35–45 GB usable | ~35 GB | 27B Q8 (~29 GB weights + KV for 4 slots) |
-| Core + all opt-in | ~84 GB physical | ~68 GB (27B) / ~62 GB (72B and 80B) | 27B with extras, or exclusive 72B/80B |
+| Core only | ~38 GB physical | 35.0 GB (`12,8,10,5`) | 27B Q8 (~29 GB weights + q4_0 KV) |
+| Core + 5060, 1070, 1660 Super | ~60 GB physical | 52.0 GB (`12,8,5,10,7,5,5`) | 27B without the two 5070 PCs (for example while training) |
+| Core + all five opt-in | ~84 GB physical | 70.0 GB (`12,8,5,9,9,10,7,5,5`) | 27B with every opt-in GPU |
+| 72B / 80B full mesh | ~84 GB physical | ~62 GB | Exclusive 72B/80B (both 5070 PCs required; not concurrent with 27B) |
 
 ---
 
@@ -132,11 +137,11 @@ VRAM (approx.):
 
 ### Qwen3.8-27B Q8_0 (default)
 
-Architecture: [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Production GGUF: [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) `Qwen3.8-27B-Q8_0.gguf` (~29 GB). Q8_0 is the production quant on this mesh: it fits the core VRAM with KV for four parallel slots. FP16 is not used.
+Architecture: [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Production GGUF: [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) `Qwen3.8-27B-Q8_0.gguf` (~29 GB). Q8_0 is the production quant on this mesh: it fits the mesh VRAM with KV for five parallel slots. FP16 is not used.
 
-Coordinator flags: `--parallel 4`, `--ctx-size 163840` (40960 per slot), KV `q4_0`. Four slots are two interactive and two automated (keep-warm and similar).
+Coordinator flags: `--parallel 5`, `--ctx-size 262144` (52428 per slot; Qwen3.8 native max), `--batch-size 8192`, `--ubatch-size 1024`, KV `q4_0`. Five slots are two interactive and three automated (keep-warm and similar). This sizing assumes the 5060 opt-in PC joins at cluster start.
 
-Keep-warm: NAS cron every 15 minutes sends four concurrent streaming completions to LiteLLM on localhost so unused slots do not go fully cold. The cron user must be able to read the env file that holds the proxy key. Keep-warm does not turn 90–200 s TTFT into 1–4 s on this hardware; it only trims idle-slot cold start.
+Keep-warm: NAS cron every 15 minutes sends five concurrent streaming completions to LiteLLM on localhost so unused slots do not go fully cold. The cron user must be able to read the env file that holds the proxy key. Keep-warm does not turn 90–200 s TTFT into 1–4 s on this hardware; it only trims idle-slot cold start.
 
 ### Qwen2.5-72B-Instruct Q5_K_M (exclusive)
 
@@ -169,7 +174,7 @@ Changing 27B to 80B is a cluster restart. Client aliases stay valid, so app env 
 
 ---
 
-## Benchmarks (Qwen3.8-27B Q8_0, full opt-in mesh)
+## Benchmarks (Qwen3.8-27B Q8_0, core + opt-in GPUs)
 
 Method: OpenAI streaming plus `usage`.
 
@@ -214,29 +219,30 @@ Decode stays network-bound until RPC is on a faster path than 1 Gbit.
 
 ## Training
 
-Training is a separate workspace on the same Windows GUI, not a second mode of the inference start screen. Configs live in [alfa-train](https://github.com/Curt-Alfrey-s-Org/alfa-train) (private; disk path often `alfa-ai-train`). The ALFa API does not train.
+Training is a separate workspace on the same Windows GUI, not a second mode of the inference start screen. Configs live in the private `alfa-train` repo (disk path often `alfa-ai-train`). The ALFa API does not train.
 
-The two 5070 12 GB cards are used for inference **or** for QLoRA, not both. Starting a 14B train job stops inference and sets a lock so cluster start is blocked until train is stopped.
+The two 5070 12 GB cards are used for inference **or** for QLoRA, not both. Starting a 7B train job sets a lock so those two GPUs cannot join the 27B opt-in mesh or a 72B/80B start. The core 27B mesh stays up while training.
 
 | Item | Value |
 |------|--------|
-| Base | [Qwen2.5-Coder-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct) |
-| Method | QLoRA SFT, JSONL `content`, seq 2048, micro-batch 1, gradient checkpointing |
-| Parallel | torchrun / DeepSpeed ZeRO-2 |
+| Base | [Qwen2.5-Coder-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct) |
+| Method | QLoRA SFT, JSONL `content`, seq 512, micro-batch 1, gradient checkpointing |
+| Parallel | torchrun DDP (Axolotl's default when DeepSpeed/FSDP are unset: [multi-GPU](https://docs.axolotl.ai/docs/multi-gpu.html)). Each rank holds a full replica; DDP does not pool VRAM |
 | GPUs | 2× 5070 12 GB |
 | Image | Official Axolotl (NAS tarball, `docker load`) |
 | Metrics | TensorBoard. The GUI is start/stop/lock only |
 
-Axolotl 13–14B QLoRA VRAM table: ~16–20 GB, hence two 12 GB cards. A 4-GPU ~40 GB layout is documented; mixed 8 GB ranks failed before checkpoint, so the GUI does not launch it.
+Axolotl 7–8B QLoRA VRAM table: ~10–14 GB per replica ([choosing method](https://docs.axolotl.ai/docs/choosing_method.html)), so one 12 GB card holds a replica at seq 512. Longer sequences hit CUDA errors on these 12 GB WSL cards. 14B QLoRA (~16–20 GB) is parked and the GUI does not start it. FSDP+QLoRA is not used for Qwen ([fsdp_qlora](https://docs.axolotl.ai/docs/fsdp_qlora.html)).
 
 | Dataset | Source | Use |
 |---------|--------|-----|
-| Repo JSONL | Multiple local git trees as completion rows | Default 14B job |
+| Repo JSONL | Multiple local git trees as completion rows | Default 7B job |
+| Cluster FAQ chat | Short chat-format Q&A about the cluster | Mixed into the default 7B job |
 | Sleep pack | Feedback, error logs, curator lessons | Separate, operator-gated job |
 
-The default 14B corpus is multi-repo, not ALFa-only.
+The default 7B corpus is multi-repo, not ALFa-only. Each new run continues the existing LoRA adapter on the full rebuilt corpus (not only the new diffs) unless a fresh adapter is chosen.
 
-Pipeline: app feedback → nightly curator (no weight update) → export + secret scan on NAS → QLoRA → held-out eval ≥ ~70% → optional LoRA GGUF and coordinator `--lora` after a full inference restart. Base 27B/72B/80B GGUFs stay unchanged until that gate.
+Pipeline: app feedback → nightly curator (no weight update) → export + secret scan on NAS → QLoRA → held-out smoke eval vs base (~70% keyword threshold, informational) and a live chat gate → optional LoRA GGUF and coordinator `--lora` after a full inference restart. Base 27B/72B/80B GGUFs stay unchanged until that gate.
 
 References: [Axolotl](https://docs.axolotl.ai/), [PEFT](https://huggingface.co/docs/peft/index).
 
